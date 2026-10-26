@@ -1,0 +1,7 @@
+*.vdi
+*.iso
+*.vbox*
+*.pem
+.env
+id_*
+devops_vm
