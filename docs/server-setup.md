@@ -158,3 +158,67 @@ bash scripts/audit.sh; echo "restored exit=$?"
 Дополнительно сохранён 00-before-boot-recovery. Нужные три снимка существуют; снимок 03 имеет UUID 488039ae-5824-46e1-80aa-b98414bbc68c. При восстановлении проверяйте правило NAT: старые снимки содержат гостевой порт 22. Откат удаляет изменения после выбранного снимка: сначала сохраните нужные файлы.
 
 Возникшие трудности: microk8s, случайно выбранный при установке, вызывал зависания при 2 ГБ RAM; отключён через snap disable microk8s. Файл SSH config.txt переименован в config. После переключения порта исправлены NAT и ssh.socket. Итоговые ресурсы VM возвращены к 2 ГБ RAM и 2 CPU.
+
+## 8. Веб-сервер
+
+Пакеты: nginx, rsync, openssl (`sudo apt update && sudo apt install -y nginx rsync openssl`). Конфигурация: `/etc/nginx/sites-available/devops-site`, ссылка в sites-enabled; стандартная ссылка default отключена. Каталог `/var/www/devops-site` принадлежит devops:devops; каталоги 755, файлы 644. www-data читает содержимое, но не может изменять его.
+
+Сертификат формируется только на сервере:
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key -out /etc/ssl/certs/devops.crt \
+  -subj '/CN=devops.local' -addext 'subjectAltName=DNS:devops.local'
+sudo chown root:root /etc/ssl/private/devops.key /etc/ssl/certs/devops.crt
+sudo chmod 600 /etc/ssl/private/devops.key
+sudo chmod 644 /etc/ssl/certs/devops.crt
+```
+
+Срок 365 дней (текущий: 26.10.2026–26.10.2027), SAN DNS:devops.local. Root master-процесс читает ключ; www-data доступа к ключу не имеет. На хост копируется только открытый сертификат: `scp devops:/etc/ssl/certs/devops.crt ~/devops.crt`.
+
+Конфигурация ресурса:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name devops.local;
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name devops.local;
+    ssl_certificate /etc/ssl/certs/devops.crt;
+    ssl_certificate_key /etc/ssl/private/devops.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /var/www/devops-site;
+    index index.html;
+    location / { try_files $uri $uri/ =404; }
+    error_page 404 /404.html;
+    access_log /var/log/nginx/devops-site.access.log;
+    error_log /var/log/nginx/devops-site.error.log;
+}
+```
+
+```bash
+sudo ln -sfn /etc/nginx/sites-available/devops-site /etc/nginx/sites-enabled/devops-site
+# Удалить только стандартную ссылку, если она существует:
+[ ! -L /etc/nginx/sites-enabled/default ] || sudo unlink /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+sudo systemctl enable nginx
+```
+
+UFW уже разрешает 80/tcp и 443/tcp. В hosts Windows и WSL: `192.168.56.101 devops.local`. HSTS не включён. Для доставки из WSL1 DevOps-Ubuntu:
+
+```bash
+cd /mnt/e/DevOps-Practice5/course
+bash scripts/deploy.sh --dry-run
+bash scripts/deploy.sh
+curl --noproxy '*' --cacert ~/devops.crt -I https://devops.local/
+curl --noproxy '*' --cacert ~/devops.crt -I https://devops.local/no-such-page
+```
+
+Перед первым rsync с --delete изучить dry-run. Деплой требует чистый Git и index.html, приводит права к D755,F644, открывает одно SSH-соединение, проверяет HTTPS без -k. Ключ SSH хранится в домашнем каталоге WSL с правами 600, .ssh — 700.
+
+Расширенный аудит: `bash scripts/audit.sh`. Веб-раздел проверяет активность Nginx, nginx -t, срок сертификата >=30 дней, отсутствие world-writable путей и ключ root:600. Отрицательные проверки: `AUDIT_CERT_MIN_DAYS=400 bash scripts/audit.sh`; временный `chmod 666 /var/www/devops-site/index.html`, аудит, обязательный возврат chmod 644. Ожидается код 1 при нарушении и 0 после восстановления.

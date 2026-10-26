@@ -28,5 +28,22 @@ check 'Firewall active' 'active' "$(awk '/^Status:/{print $2}' <<< "$ufw_status"
 check 'Default incoming policy' 'deny' "$(sed -n 's/^Default: \([^ ]*\) (incoming).*/\1/p' <<< "$ufw_status")"
 echo '[3] User accounts'
 awk -F: '$3>=1000 && $3<65534 {printf " %s (uid=%s)\n",$1,$3}' /etc/passwd
+echo '[4] Web server'
+check 'Nginx service active' 'active' "$(systemctl is-active nginx 2>/dev/null || true)"
+nginx_ok=no
+if sudo nginx -t; then nginx_ok=yes; fi
+check 'Nginx configuration valid' 'yes' "$nginx_ok"
+cert_days=${AUDIT_CERT_MIN_DAYS:-30}
+[[ "$cert_days" =~ ^[0-9]+$ ]] || { echo 'Invalid AUDIT_CERT_MIN_DAYS' >&2; exit 1; }
+cert_ok=no
+if openssl x509 -in /etc/ssl/certs/devops.crt -noout -checkend "$((cert_days * 86400))"; then cert_ok=yes; fi
+check "Certificate valid for at least $cert_days days" 'yes' "$cert_ok"
+permissions_ok=no
+if writable=$(find /var/www/devops-site -perm -o+w -print) &&
+   key_mode=$(sudo stat -c '%a:%U' /etc/ssl/private/devops.key) &&
+   [[ -z "$writable" && "$key_mode" == '600:root' ]]; then
+    permissions_ok=yes
+fi
+check 'No world-writable site paths; TLS key root:600' 'yes' "$permissions_ok"
 printf 'Passed: %s, failed: %s\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
