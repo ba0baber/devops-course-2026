@@ -102,7 +102,7 @@ ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password -p 2222 devo
 
 На Windows от администратора добавьте в `C:\Windows\System32\drivers\etc\hosts` строку `192.168.56.101 devops.local`. Проверка: `ssh -i "$env:USERPROFILE\.ssh\devops_vm" -p 2222 devops@devops.local`.
 
-В Ubuntu строка /etc/hosts должна содержать `127.0.1.1 devops-vm.devops.local devops-vm`; `sudo hostnamectl set-hostname devops-vm`; проверка `hostname -f`. Фактически получено devops-vm.devops.local. Проверка Windows hosts оформляется отдельно после записи от администратора.
+В Ubuntu строка /etc/hosts должна содержать `127.0.1.1 devops-vm.devops.local devops-vm`; `sudo hostnamectl set-hostname devops-vm`; проверка `hostname -f`. Фактически получено devops-vm.devops.local. Запись Windows hosts проверена: 192.168.56.101 devops.local; журнал настройки подтвердил разрешение имени. Подключение с Windows по имени devops.local проверено: команда hostname -f вернула devops-vm.devops.local. При первом входе через Host-only сверьте отпечаток ключа с консолью: SHA256:8o3y/eOBlOl98ifHG5i7npD98WpToyTtppbvg93hhtc. На сервере `grep "^hosts:" /etc/nsswitch.conf` возвращает `hosts: files dns`: сначала /etc/hosts, затем DNS через системный резолвер.
 
 ## 6. Межсетевой экран и аудит
 
@@ -123,18 +123,37 @@ sudo ufw status verbose
 
 Из Windows выполните `curl.exe --noproxy "*" -m 3 http://192.168.56.101:8080`. Ожидается тайм-аут. Сам тайм-аут не доказывает блокировку UFW; сопоставьте его с журналом Ubuntu: `sudo grep 'UFW BLOCK' /var/log/ufw.log | tail -5`. Найдите SRC=192.168.56.1, DST=192.168.56.101, PROTO=TCP, DPT=8080.
 
+Получение скрипта в Ubuntu без установки Git (Python 3 входит в установленную систему):
+
 ```bash
+mkdir -p ~/devops-course-2026/scripts
+cd ~/devops-course-2026
+python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/ba0baber/devops-course-2026/main/scripts/audit.sh', 'scripts/audit.sh')"
+bash -n scripts/audit.sh
 bash scripts/audit.sh
 echo $?
 ```
+
+Воспроизводимый отрицательный тест из каталога проекта (не перезапускать SSH с тестовой настройкой):
+
+```bash
+sudo cp -a /etc/ssh/sshd_config.d/99-hardening.conf /etc/ssh/sshd_config.d/99-hardening.conf.audit-backup
+sudo sed -i 's/^MaxAuthTries .*/MaxAuthTries 10/' /etc/ssh/sshd_config.d/99-hardening.conf
+bash scripts/audit.sh; echo "negative exit=$?"
+sudo cp -a /etc/ssh/sshd_config.d/99-hardening.conf.audit-backup /etc/ssh/sshd_config.d/99-hardening.conf
+sudo sshd -t
+bash scripts/audit.sh; echo "restored exit=$?"
+```
+
+Не прерывайте тест до восстановления конфигурации; при прерывании восстановите файл из audit-backup и выполните sshd -t.
 
 Аудит проверяет запрет root, запрет паролей, нестандартный SSH-порт, MaxAuthTries=3, активность UFW и deny incoming. Проверено: 6 успешных проверок, код 0. При временном MaxAuthTries=10: 5 успешных, 1 ошибка, код 1. Конфигурация восстановлена до 3, повторно 6 успешных, код 0. Для отрицательного теста сервис не перезапускался; аудит читает конфигурацию через sshd -T.
 
 ## 7. Снимки и восстановление
 
-- 01-clean-install — установленная Ubuntu, до настройки пользователя и ключей; 26.10.2026.
-- 02-keys-configured — пользователь devops и рабочий вход по ключу; 26.10.2026.
-- 03-ssh-hardened — SSH на 2222, запрет root/паролей, успешные проверки входа; 26.10.2026, до UFW.
+- 01-clean-install — установленная Ubuntu, до настройки пользователя и ключей; 26.10.2026, 16:52:22 МСК.
+- 02-keys-configured — пользователь devops и рабочий вход по ключу; 26.10.2026, 17:38:08 МСК.
+- 03-ssh-hardened — SSH на 2222, запрет root/паролей, успешные проверки входа; 26.10.2026, 18:24:26 МСК, до UFW.
 
 Дополнительно сохранён 00-before-boot-recovery. Нужные три снимка существуют; снимок 03 имеет UUID 488039ae-5824-46e1-80aa-b98414bbc68c. При восстановлении проверяйте правило NAT: старые снимки содержат гостевой порт 22. Откат удаляет изменения после выбранного снимка: сначала сохраните нужные файлы.
 
