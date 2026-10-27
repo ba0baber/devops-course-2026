@@ -1,3 +1,10 @@
 * text=auto
 *.sh text eol=lf
 *.md text eol=lf
+
+app/Dockerfile text eol=lf
+app/.dockerignore text eol=lf
+app/*.py text eol=lf
+app/*.yml text eol=lf
+app/*.txt text eol=lf
+app/.env.example text eol=lf
