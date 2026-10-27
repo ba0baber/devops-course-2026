@@ -45,5 +45,14 @@ if writable=$(find /var/www/devops-site -perm -o+w -print) &&
     permissions_ok=yes
 fi
 check 'No world-writable site paths; TLS key root:600' 'yes' "$permissions_ok"
+echo '[5] Containerization'
+check 'Docker service active' 'active' "$(systemctl is-active docker 2>/dev/null || true)"
+check 'PostgreSQL container healthy' 'healthy' "$(sudo docker inspect -f '{{.State.Health.Status}}' app-db-1 2>/dev/null || true)"
+listeners=$(ss -H -tln)
+bad_ports=$(awk '$4 ~ /:(5000|5432)$/ && $4 !~ /^127\.0\.0\.1:(5000|5432)$/ {print $4}' <<< "$listeners")
+ports_safe=no
+if [[ -z "$bad_ports" ]] && awk '$4=="127.0.0.1:5000" {found=1} END {exit !found}' <<< "$listeners"; then ports_safe=yes; fi
+check 'Application loopback only; no public database port' 'yes' "$ports_safe"
+check 'Server .env permissions' '600' "$(stat -c '%a' /home/devops/app/.env 2>/dev/null || true)"
 printf 'Passed: %s, failed: %s\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

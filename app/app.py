@@ -7,6 +7,7 @@ app = Flask(__name__)
 
 
 def get_connection():
+    """Connect to PostgreSQL using the Compose service name from DB_HOST."""
     return psycopg2.connect(
         host=os.getenv("DB_HOST", "localhost"),
         dbname=os.getenv("POSTGRES_DB", "app"),

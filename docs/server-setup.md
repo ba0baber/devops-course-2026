@@ -222,3 +222,89 @@ curl --noproxy '*' --cacert ~/devops.crt -I https://devops.local/no-such-page
 Перед первым rsync с --delete изучить dry-run. Деплой требует чистый Git и index.html, приводит права к D755,F644, открывает одно SSH-соединение, проверяет HTTPS без -k. Ключ SSH хранится в домашнем каталоге WSL с правами 600, .ssh — 700.
 
 Расширенный аудит: `bash scripts/audit.sh`. Веб-раздел проверяет активность Nginx, nginx -t, срок сертификата >=30 дней, отсутствие world-writable путей и ключ root:600. Отрицательные проверки: `AUDIT_CERT_MIN_DAYS=400 bash scripts/audit.sh`; временный `chmod 666 /var/www/devops-site/index.html`, аудит, обязательный возврат chmod 644. Ожидается код 1 при нарушении и 0 после восстановления.
+
+## 9. Контейнеризация
+
+Docker Engine устанавливается из официального APT-репозитория https://download.docker.com/linux/ubuntu, пакеты `docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`. Пакет docker.io не используется. Открытый ключ репозитория: /etc/apt/keyrings/docker.asc; источник: /etc/apt/sources.list.d/docker.sources. Проверенные версии: Docker Engine 29.9.2 (пакет 5:29.9.2-1~ubuntu.24.04~noble), Compose v5.6.1. Версии и происхождение пакетов фиксируются `docker version`, `docker compose version`, `apt-cache policy docker-ce` в журнале проверки практической 7.
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod 644 /etc/apt/keyrings/docker.asc
+. /etc/os-release
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker devops
+```
+
+После добавления группы начать новую SSH-сессию. Единственный добавленный участник группы docker — devops, уже имеющий право sudo. Эта группа фактически даёт полномочия root через Docker daemon, поэтому её не следует выдавать учётным записям без административного доступа.
+
+Проект находится в /home/devops/app. Исходники — app/ репозитория. Доставка из WSL сначала проверяется dry-run:
+
+```bash
+rsync -avz --delete --exclude=.env --chmod=D755,F644 --dry-run app/ devops:app/
+rsync -avz --delete --exclude=.env --chmod=D755,F644 app/ devops:app/
+```
+
+Исключение .env сохраняет серверный секрет при --delete. Файл /home/devops/app/.env создаётся только на сервере, принадлежит devops:devops и имеет права 600. Значения POSTGRES_DB=app, POSTGRES_USER=app, DB_HOST=db; POSTGRES_PASSWORD генерируется случайно. Не печатать файл, не копировать на хост и не добавлять в Git. В репозитории только .env.example с заглушкой change_me. .env исключён также через .dockerignore.
+
+Создание .env без вывода пароля:
+
+```bash
+cd ~/app
+python3 - <<'PY'
+from pathlib import Path
+import os, secrets
+p = Path('.env')
+if not p.exists():
+    text = Path('.env.example').read_text().replace('change_me', secrets.token_hex(16))
+    fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write(text)
+os.chmod(p, 0o600)
+PY
+docker compose config --quiet
+docker compose up -d --build --wait --wait-timeout 120
+docker compose ps
+```
+
+Dockerfile: python:3.12-slim, зависимости ставятся до COPY app.py для кэширования, файлы root:644, USER app (UID 999), gunicorn в exec-форме. Образ devops-app:1.0. Compose-сервисы app и db, база postgres:16-alpine, сеть app_backend с DNS-именем db. PostgreSQL хранит данные в именованном томе app_db_data (/var/lib/postgresql/data контейнера). Условие depends_on service_healthy ожидает pg_isready.
+
+Публикуется только 127.0.0.1:5000:5000 сервиса app. Порт 5432 сервиса db не публикуется. Docker может обходить правила UFW для опубликованных портов, поэтому привязка к loopback обязательна. docker compose down сохраняет том; down -v удаляет данные, допустим только для осознанного сброса учебной базы. После работы проект и том сохраняются.
+
+В существующий HTTPS server файла /etc/nginx/sites-available/devops-site добавлен блок; статический location / сохранён:
+
+```nginx
+location /app/ {
+    proxy_pass http://127.0.0.1:5000/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Завершающий / в proxy_pass удаляет префикс /app/. Применение: sudo nginx -t && sudo systemctl reload nginx. Проверки с хоста:
+
+```bash
+curl --noproxy '*' --cacert ~/devops.crt https://devops.local/app/
+curl --noproxy '*' --cacert ~/devops.crt https://devops.local/app/health
+curl --noproxy '*' --cacert ~/devops.crt -I https://devops.local/
+```
+
+При 502 проверить docker compose ps, docker compose logs app, доступность 127.0.0.1:5000/health и журнал /var/log/nginx/devops-site.error.log. Публикация базы данных на хосте для решения проблем не требуется.
+
+Раздел [5] scripts/audit.sh проверяет active Docker, healthy app-db-1, loopback-привязку приложения с отсутствием публичных 5000/5432 и права .env=600. Запускать bash scripts/audit.sh; ожидается 14 успешных проверок и код 0. Отрицательный тест временно меняет публикацию на 5000:5000, docker compose up -d, аудит должен вернуть 1. После восстановления 127.0.0.1:5000:5000 снова up -d и аудит с кодом 0. Файл .env при этом не изменяется. Снимок 05-docker-compose сохраняет состояние после проверки данных; 04-nginx-https из практической 6 также сохранён.
+
+Базовый образ Python закреплён по digest в app/Dockerfile: python:3.12-slim@sha256:12316debbfb86890f6b2d825820612741ba527ad5a44e3902759141d572bfe8f. Плавающий тег обновился между первоначальными сборками, что привело к корректной инвалидизации кэша. Закрепление сохраняет выбранную версию основы для воспроизводимого опыта.
